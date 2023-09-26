@@ -1,0 +1,1958 @@
+---
+title: "PhyloseqAndDeseq2"
+author: "Linnea Honeker"
+date: "3/2/2023"
+output: html_document
+---
+# mac analysis for Parker
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library("DESeq2")
+packageVersion("DESeq2")
+library("phyloseq")
+library(dplyr)
+library(knitr)
+library(apeglm)
+library("ggplot2")
+library("pheatmap")
+library("stringr")
+library(tidyverse)
+library(cowplot)
+library(reshape2)
+library(heatmaply)
+library(dada2)
+library(phangorn)
+library(ggplot2)
+library(microbiome)
+library(RColorBrewer)
+
+
+col_list <- c( "chartreuse3", "darkseagreen1","blue","lightblue",
+                             "orange4", "yellow2","darkorchid", "plum2",
+                             "darkred", "darksalmon", "hotpink4", "lightpink", "lightblue4", "lightcyan3", "orange",
+                             "moccasin", "lightslateblue", "lightsteelblue1", "navy",
+                             "darkgray", "black","brown", "cornflowerblue","darkgoldenrod",
+                             "brown3","white","aquamarine","aliceblue","azure",
+                             "beige","bisque","blue2","blueviolet","cyan","darkblue",
+                             "chocolate","coral","coral4","aquamarine3","darkcyan","deeppink",
+                             "darkred","darkslateblue")
+col_list2 = c("#F8766D", "#00BFC4")
+
+# parameters for plots
+h = 6
+w = 7
+res = 300
+size = 10
+
+list_of_shapes <- c(15,17, 16,18,3,7,8,9,10,4,11,12,13,14)
+```
+
+## Create phyloseq object
+```{r phyloseq object, echo=FALSE}
+#import biom table
+otu=import_biom("../../Data/16S/feature-table-json.biom", taxa_are_rows = TRUE)
+
+#import sample metadata
+map = import_qiime_sample_data("../../Data/16S/sample-metadata.txt")
+#map$Experiment <-as.factor(map$Experiment)
+#row.names(map) <- map$Description
+
+#import taxnomy
+taxa.frame = read.csv(file="../../Data/16S/taxonomy.csv", header = TRUE, sep=",", 
+                      blank.lines.skip = TRUE)
+
+taxmat = as.matrix(taxa.frame)
+rownames(taxmat) <- taxmat[,1]
+taxmat <- taxmat[,-1]
+tax=tax_table(taxmat,errorIfNULL = TRUE)
+#colnames(taxmat2) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus",
+
+
+#import tree
+#tree = import_qiime(treefilename = "tree.nwk")
+
+#merge otu-table, sample-metadata, taxonomy, and tree
+Data= merge_phyloseq(otu,map,tax)#,tree)
+Data
+taxa_are_rows(Data)
+
+#filter to leave mac  samples
+mac = subset_samples(Data, Experiment == "mac")
+mac
+
+mac.s <- subset_samples(mac, SampleID != "VB0889_123")
+mac.s
+
+#filter out control
+#mac.nc = subset_samples(mac, Isoprene == 'iso')
+
+#filter to top and bottom
+mac.top = subset_samples(mac.s, Depth == "top")
+
+mac.deep= subset_samples(mac.s, Depth == "deep")
+
+mac.top.post.0 = subset_samples(mac.top, Time != "0")
+
+#filter out blanks
+mac = subset_samples(mac, Depth != "blank")
+
+#filter to rhizosphere and bulk
+mac.rhizo = subset_samples(mac.s, Allocation == "rhizo")
+
+mac.bulk = subset_samples(mac.s, Allocation == "bulk")
+
+#filter top no time zero
+mac.top.no.0 = subset_samples(mac.top, Time != "0")
+
+#filter to rhizosphere and top
+mac.rhizo.top = subset_samples(mac.top.no.0, Allocation == "rhizo") 
+
+
+#filter top no time zero, just hi and lo
+mac.top.hi.lo = subset_samples(mac.top.no.0, Line == "hi" |
+                                Line == "lo")
+
+#filter to zerio and rhizosphere and top hi and lo
+mac.top.rhizo.hi.lo = subset_samples(mac.rhizo.top, Line == "hi" |
+                                 Line == "lo" )
+
+#filter everything to no time zero
+mac.no.0 = subset_samples(mac.s, Time != "0")
+
+#filter to everything , just hi, lo
+mac.hi.lo.no.zero = subset_samples(mac.no.0, Line == "hi" |
+                                 Line == "lo" )
+
+```
+## Steps:
+### filter phylseq object to remove low sequence counts ( < 0.01%) and rarefy
+```{r filter, include  = FALSE}
+# all depths
+total_counts <-sum(taxa_sums(mac.s))
+threshold <- 0.00001*total_counts
+mac.f <- filter_taxa(mac.s, function(x) sum(x) > threshold, TRUE)
+
+mac.f.ra = rarefy_even_depth(mac.f,(min(sample_sums(mac.f))))
+
+#no control
+#total_counts.nc <- sum(taxa_sums(mac.nc))
+#threshold.nc <- 0.00001*total_counts.nc
+#mac.ncf <- filter_taxa(mac.nc, function(x) sum(x) > threshold.nc, TRUE)
+
+#mac.ncf.ra = rarefy_even_depth(mac.ncf, min(sample_sums(mac.ncf)))
+
+# top
+total_counts.top <- sum(taxa_sums(mac.top))
+threshold.top <- 0.00001*total_counts.top
+mac.topf <- filter_taxa(mac.top, function(x) sum(x) > threshold.top, TRUE)
+
+mac.topf.ra = rarefy_even_depth(mac.topf, min(sample_sums(mac.topf)))
+
+# bottom
+total_counts.deep <- sum(taxa_sums(mac.deep))
+threshold.deep <- 0.00001*total_counts.deep
+mac.deepf <- filter_taxa(mac.deep, function(x) sum(x) > threshold.deep, TRUE)
+
+mac.deepf.ra = rarefy_even_depth(mac.deepf, min(sample_sums(mac.deepf)))
+
+# rhizo
+total_counts.rhizo <- sum(taxa_sums(mac.rhizo))
+threshold.rhizo <- 0.00001*total_counts.rhizo
+mac.rhizof <- filter_taxa(mac.rhizo, function(x) sum(x) > threshold.rhizo, TRUE)
+
+mac.rhizof.ra = rarefy_even_depth(mac.rhizof, min(sample_sums(mac.rhizof)))
+
+#bulk
+total_counts.bulk <- sum(taxa_sums(mac.bulk))
+threshold.bulk <- 0.00001*total_counts.bulk
+mac.bulkf <- filter_taxa(mac.bulk, function(x) sum(x) > threshold.bulk, TRUE)
+
+mac.bulkf.ra = rarefy_even_depth(mac.bulkf, min(sample_sums(mac.bulkf)))
+
+#top no zero
+total_counts.mac.top.no.0 <- sum(taxa_sums(mac.top.no.0))
+threshold.mac.top.no.0 <- 0.00001*total_counts.mac.top.no.0
+mac.top.no.0.f.0 <- filter_taxa(mac.top.no.0, function(x) sum(x) > threshold.mac.top.no.0, TRUE)
+mac.top.no.0.f <- subset_samples(mac.top.no.0.f.0, sample_sums(mac.top.no.0.f.0) != 0)
+
+mac.top.no.0.f.ra = rarefy_even_depth(mac.top.no.0.f, min(sample_sums(mac.top.no.0.f)))
+
+#rhizo - top
+total_counts.rhizo.top <- sum(taxa_sums(mac.rhizo.top))
+threshold.rhizo.top <- 0.00001*total_counts.rhizo.top
+mac.rhizo.topf.0 <- filter_taxa(mac.rhizo.top, function(x) sum(x) > threshold.rhizo.top, TRUE)
+mac.rhizo.topf <- subset_samples(mac.rhizo.topf.0, sample_sums(mac.rhizo.topf.0) != 0)
+
+mac.rhizo.topf.ra = rarefy_even_depth(mac.rhizo.topf, min(sample_sums(mac.rhizo.topf)))
+
+#top - hi - lo
+total_counts.top.hi.lo <- sum(taxa_sums(mac.top.hi.lo))
+threshold.top.hi.lo <- 0.00001*total_counts.top.hi.lo
+mac.top.hi.lo.f.0 <- filter_taxa(mac.top.hi.lo, function(x) sum(x) > threshold.top.hi.lo, TRUE)
+mac.top.hi.lo.f <- subset_samples(mac.top.hi.lo.f.0, sample_sums(mac.top.hi.lo.f.0) != 0)
+
+set.seed(123)
+mac.top.hi.lo.f.ra = rarefy_even_depth(mac.top.hi.lo.f, min(sample_sums(mac.top.hi.lo.f)))
+
+#rhizo-top- hi - lo
+total_counts.mac.top.rhizo.hi.lo <- sum(taxa_sums(mac.top.rhizo.hi.lo))
+threshold.mac.top.rhizo.hi.lo<- 0.00001*total_counts.mac.top.rhizo.hi.lo
+mac.top.rhizo.hi.lo.f.0 <- filter_taxa(mac.top.rhizo.hi.lo, function(x) sum(x) > threshold.mac.top.rhizo.hi.lo, TRUE)
+mac.top.rhizo.hi.lo.f <- subset_samples(mac.top.rhizo.hi.lo.f.0, sample_sums(mac.top.rhizo.hi.lo.f.0) != 0)
+
+set.seed(123)
+mac.top.rhizo.hi.lo.f.ra = rarefy_even_depth(mac.top.rhizo.hi.lo.f, min(sample_sums(mac.top.rhizo.hi.lo.f)))
+
+#no zero
+total_counts.no.0 <- sum(taxa_sums(mac.no.0))
+threshold.no.0 <- 0.00001*total_counts.no.0
+mac.no.0.f.0 <- filter_taxa(mac.no.0, function(x) sum(x) > threshold.no.0, TRUE)
+mac.no.0.f <- subset_samples(mac.no.0.f.0, sample_sums(mac.no.0.f.0) != 0)
+
+set.seed(123)
+mac.no.0.f.ra = rarefy_even_depth(mac.no.0.f, min(sample_sums(mac.no.0.f)))
+
+#no zero, just hi and lo
+total_counts.hi.lo.no.zero <- sum(taxa_sums(mac.hi.lo.no.zero))
+threshold.hi.lo.no.zero<- 0.00001*total_counts.hi.lo.no.zero
+mac.hi.lo.no.zero.f.0 <- filter_taxa(mac.hi.lo.no.zero, function(x) sum(x) > threshold.hi.lo.no.zero, TRUE)
+mac.hi.lo.no.zero.f <- subset_samples(mac.hi.lo.no.zero.f.0, sample_sums(mac.hi.lo.no.zero.f.0) != 0)
+
+set.seed(123)
+mac.hi.lo.no.zero.f.ra = rarefy_even_depth(mac.hi.lo.no.zero.f, min(sample_sums(mac.hi.lo.no.zero.f)))
+
+```
+
+### alpha diversity
+```{r alpha diversity, echo = FALSE}
+#-------------------alpha diversity------------------------
+#change order of facetssam
+sample_data(mac.f.ra)$Line <- factor(sample_data(mac.f.ra)$Line, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+sample_data(mac.f.ra)$Line2 <- factor(sample_data(mac.f.ra)$Line2, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+alpha_meas = c("Observed", "Shannon")
+(p <- plot_richness(mac.f.ra, "Line","Time", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Line, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line-depth.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+rich <- estimate_richness(mac.f.ra)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Time)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Line)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Line)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Time)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Plants","Fertigation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Plants, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-plants-fertigation-depth.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Plants)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Fertigation)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Plants)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Fertigation)
+
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Time","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Time, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line2.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Line2)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Line2)
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Fertigation","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Fertigation, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-fertigation-line2.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Line2","Allocation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Line2, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-allocation-line2.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Allocation)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Allocation)
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Depth","Allocation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Depth, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-depth-allocation.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.f.ra)$Depth)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.f.ra)$Depth)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.f.ra, "Allocation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Allocation, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-allocation.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+
+
+
+```
+### alpha diversity - rhizosphere only
+```{r alpha diversity, echo = FALSE}
+#-------------------alpha diversity------------------------
+#change order of facetssam
+sample_data(mac.rhizof.ra)$Line <- factor(sample_data(mac.rhizof.ra)$Line, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+sample_data(mac.rhizof.ra)$Line2 <- factor(sample_data(mac.rhizof.ra)$Line2, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+alpha_meas = c("Observed", "Shannon")
+(p <- plot_richness(mac.rhizof.ra, "Line","Time", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Line, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line-rhizo.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+rich <- estimate_richness(mac.rhizof.ra)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Line)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Time)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Line)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Time)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizof.ra, "Plants","Fertigation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Plants, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-plants-fertigation-rhizo.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Plants)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Fertigation)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Plants)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Fertigation)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizof.ra, "Time","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Time, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line2-rhizo.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Line2)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Line2)
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizof.ra, "Fertigation","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Fertigation, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-fertigation-line2-rhizo.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizof.ra, "Line2","Depth", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Line2, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-line2-depth-rhizo.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizof.ra)$Depth)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizof.ra)$Depth)
+
+
+
+
+```
+
+### alpha diversity - rhizosphere top only
+```{r alpha diversity, echo = FALSE}
+#-------------------alpha diversity------------------------
+#change order of facetssam
+sample_data(mac.rhizo.topf.ra)$Line <- factor(sample_data(mac.rhizo.topf.ra)$Line, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+sample_data(mac.rhizo.topf.ra)$Line2 <- factor(sample_data(mac.rhizo.topf.ra)$Line2, 
+                                   levels =c("Control", "lo", "mid", "hi"))
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+alpha_meas = c("Observed", "Shannon")
+(p <- plot_richness(mac.rhizo.topf.ra, "Line","Time", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Line, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line-rhizo.top.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+rich <- estimate_richness(mac.rhizo.topf.ra)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizo.topf.ra)$Line)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizo.topf.ra)$Time)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizo.topf.ra)$Line)
+pairwise.wilcox.test(rich$Shannon, sample_data(mac.rhizo.topf.ra)$Time)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizo.topf.ra, "Plants","Fertigation", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Plants, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-plants-fertigation-rhizo.top.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizo.topf.ra, "Time","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Time, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-time-line2-rhizo.top.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#define and plot alpha diversity measurements on unrarefied samples
+(p <- plot_richness(mac.rhizo.topf.ra, "Fertigation","Line2", measures=alpha_meas))
+
+#Add ggplot2 layer-boxplots
+p.alpha <- p+geom_boxplot(data=p$data, aes(x=Fertigation, y=value), alpha=0.1, size = 1.0) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.alpha
+filename <- paste0("../../Figures/16S/alpha-fertigation-line2-rhizo.top.png")
+ggsave(filename,units=c('in'),width=7,height=5,dpi=1000,p.alpha)
+
+#export data frame with alpha results
+rich <- estimate_richness(mac.rhizo.topf.ra)
+pairwise.wilcox.test(rich$Observed, sample_data(mac.rhizo.topf.ra)$Fertigation)
+
+
+
+```
+
+### taxonomy plots
+phylum
+```{r taxonomy phylum, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.f, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Phylum") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Phylum <- as.character(mac.f.dat$Phylum) #convert to character vector from factor
+mac.f.dat$Phylum[mac.f.dat$Abundance < 0.02] <- "Phylum < 2%"
+
+#######plot Phylum######################################
+#Pit
+#change order of facets
+mac.f.dat$Line <- factor(mac.f.dat$Line, 
+                        levels = c("Control", "lo", "mid", "hi"))
+mac.f.dat$Line2 <- factor(mac.f.dat$Line2, 
+                        levels = c("na", "Control", "lo", "mid", "hi"))
+                          
+
+p <- ggplot(mac.f.dat, aes(x=Time, y = Abundance, fill=Phylum)) 
+
+p.phylum <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(Line ~ Depth,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.phylum
+filename <- paste0("../../Figures/16S/phylum-time-line-depth.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.phylum)
+
+#plot fertigation as x-axis
+p <- ggplot(mac.f.dat, aes(x=Fertigation, y = Abundance, fill=Phylum)) 
+
+p.phylum <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(Line ~ Depth,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.phylum
+filename <- paste0("../../Figures/16S/phylum-fertigation-line-depth.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.phylum)
+
+#plot line2 as x-axis
+p <- ggplot(mac.f.dat, aes(x=Line2, y = Abundance, fill=Phylum)) 
+
+p.phylum <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(~ Depth,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.phylum
+filename <- paste0("../../Figures/16S/phylum-line2--depth.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.phylum)
+
+#plot line2 as x-axis
+p <- ggplot(mac.f.dat, aes(x=Line2, y = Abundance, fill=Phylum)) 
+
+p.phylum <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(~ Allocation,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.phylum
+filename <- paste0("../../Figures/16S/phylum-line2-allocation.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.phylum)
+```
+
+### taxonomy plots - rhizosphere only
+phylum
+```{r taxonomy phylum, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.rhizof.rel.abun <- transform_sample_counts(mac.rhizof, function(x) x/sum(x)) #convert counts to relative abundances
+mac.rhizof.glom <- tax_glom(mac.rhizof.rel.abun, taxrank = "Phylum") #agglomerate taxa to Phylum-level
+mac.rhizof.dat <- psmelt(mac.rhizof.glom)
+mac.rhizof.dat$Phylum <- as.character(mac.rhizof.dat$Phylum) #convert to character vector from factor
+mac.rhizof.dat$Phylum[mac.rhizof.dat$Abundance < 0.02] <- "Phylum < 2%"
+
+#######plot Phylum######################################
+#Pit
+#change order of facets
+mac.rhizof.dat$Line <- factor(mac.rhizof.dat$Line, 
+                        levels = c("Control", "lo", "mid", "hi"))
+                          
+
+p <- ggplot(mac.rhizof.dat, aes(x=Time, y = Abundance, fill=Phylum)) 
+
+p.phylum <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(Line ~ Depth,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.phylum
+filename <- paste0("../../Figures/16S/phylum-time-line-depth-rhizo.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.phylum)
+
+```
+
+
+genus
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.f, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Genus <- as.character(mac.f.dat$Genus) #convert to character vector from factor
+mac.f.dat$Genus[mac.f.dat$Abundance < 0.01] <- "Genus < 1%"
+
+#######plot Genus######################################
+
+#change order of facets
+mac.f.dat$Line <- factor(mac.f.dat$Line, 
+                        levels = c("Control", "lo", "mid", "hi"))
+mac.f.dat$Line2 <- factor(mac.f.dat$Line2, 
+                        levels = c("na", "Control", "lo", "mid", "hi"))
+                          
+p <- ggplot(mac.f.dat, aes(x=Time, y = Abundance, fill=Genus)) 
+
+p.genus <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(Line ~ Depth, ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.genus
+filename <- paste0("../../Figures/16S/genus-time-line.png")
+ggsave(filename,units=c('in'),width=15,height=12,dpi=1000,p.genus)
+
+#plot line2 as x-axis
+p <- ggplot(mac.f.dat, aes(x=Line2, y = Abundance, fill=Genus)) 
+
+p.genus <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(~ Depth,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.genus
+filename <- paste0("../../Figures/16S/genus-line2--depth.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.genus)
+
+#plot line2 as x-axis
+p <- ggplot(mac.f.dat, aes(x=Line2, y = Abundance, fill=Genus)) 
+
+p.genus <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(~ Allocation,  ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=12, angle=90,hjust =1, vjust=0.2))
+
+p.genus
+filename <- paste0("../../Figures/16S/genus-line2-allocation.png")
+ggsave(filename,units=c('in'),width=12,height=10,dpi=1000,p.genus)
+```
+
+genus - top - merge abundance < 0.01 (1%)
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.topf, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Genus <- as.character(mac.f.dat$Genus) #convert to character vector from factor
+mac.f.dat$Genus[mac.f.dat$Abundance < 0.01] <- "Genus < 1%"
+
+#######plot Genus######################################
+
+#change order of facets
+mac.f.dat$Line <- factor(mac.f.dat$Line, 
+                        levels = c("Control", "lo", "mid", "hi"))
+mac.f.dat$Line2 <- factor(mac.f.dat$Line2, 
+                        levels = c("na", "Control", "lo", "mid", "hi"))
+                          
+p <- ggplot(mac.f.dat, aes(x=Line2, y = Abundance, fill=Genus)) 
+
+p.genus <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  #facet_wrap(Depth ~ Line2, ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.genus
+filename <- paste0("../../Figures/16S/genus-top-time-line.png")
+ggsave(filename,units=c('in'),width=15,height=12,dpi=1000,p.genus)
+
+```
+
+genus - top - no zero- methylotrophs
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.top.no.0.f, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Genus <- as.character(mac.f.dat$Genus) #convert to character vector from factor
+
+methylotrophs = c("Methylomonas", "Methylobacter", "Methylococcus", "Methylosinus", "Methylocystis","Methylophilus", "Methylovorus", "Methylophaga",
+                  "Methylobacterium", "Hyphomicrobium", "Acidomonas", "Paracoccus", "Xanthobacter", "Microcyclus", 
+                  "Thiobacillus", "Rhodospeudomonas", "Mycobacterium", "Bacillus", "Arthrobacter", "Amycolatopsis", "Balneimonas", "Methylocella",
+                  "Methylibium", "Methylotenera", "Methyloversatilis", "Methylobacillus", "Pseudomonas", "Burkholderia", "Catellibacterium", 
+                  "Methanosarcina", "Methanolobus", "Methylorubrum", "Methylocella", "Pleomorphomonas" , "Methylotuvimicrobium")
+#######plot paracoccus######################################
+
+mac.f.dat.genus.para <- mac.f.dat %>%
+ filter(Genus == "Paracoccus")
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Line2)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/paracoccus-top-time-line2.png", width=8, height=7, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Line2, y=Abundance, fill=Line2)) +
+  geom_boxplot() 
+p
+ggsave("../../Figures/16S/paracoccus-top-line2.png", width=8, height=7, units='in', dpi=1000)
+#
+
+#######plot all mehtylotrophs######################################
+
+mac.f.dat.genus.methyl <- mac.f.dat %>%
+ filter(Genus %in% methylotrophs) %>%
+  select(-SampleID, -Plate, -Well, -barcodes, -Line, -OTU, -Plants, -Fertigation, -Plot, -Depth, 
+         -Allocation, -SampleStorage, -Isoprene, -Experiment, -Column, -Description, -Kingdom, -Phylum, -Class,
+         -Order, -Family)
+
+
+p <- mac.f.dat.genus.methyl %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Genus)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/methylotrophs-top-time-line2.png", width=10, height=5, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.methyl %>%
+  group_by(Line2) %>%
+  summarise(sum.abundance = sum(Abundance)) %>%
+  ggplot(., aes(x=Line2, y=sum.abundance, fill=Line2)) +
+  geom_bar(aes(), stat = "identity")
+p
+ggsave("../../Figures/16S/methylotrophs-top-sum-line2.png", width=5, height=4, units='in', dpi=1000)
+
+```
+genus - top and bottom - all taxa
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.no.0.f, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Genus <- as.character(mac.f.dat$Genus) #convert to character vector from factor
+
+methylotrophs = c("Methylomonas", "Methylobacter", "Methylococcus", "Methylosinus", "Methylocystis","Methylophilus", "Methylovorus", "Methylophaga",
+                  "Methylobacterium", "Hyphomicrobium", "Acidomonas", "Paracoccus", "Xanthobacter", "Microcyclus", 
+                  "Thiobacillus", "Rhodospeudomonas", "Mycobacterium", "Bacillus", "Arthrobacter", "Amycolatopsis", "Balneimonas", "Methylocella",
+                  "Methylibium", "Methylotenera", "Methyloversatilis", "Methylobacillus", "Pseudomonas", "Burkholderia", "Catellibacterium", 
+                  "Methanosarcina", "Methanolobus", "Methylorubrum", "Methylocella", "Pleomorphomonas" , "Methylotuvimicrobium")
+
+#######plot paracoccus######################################
+
+mac.f.dat.genus.para <- mac.f.dat %>%
+ filter(Genus == "Paracoccus")
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Line2)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/paracoccus-time-line2.png", width=8, height=7, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Line2, y=Abundance, fill=Line2)) +
+  geom_boxplot() 
+p
+ggsave("../../Figures/16S/paracoccus-line2.png", width=8, height=7, units='in', dpi=1000)
+#
+
+#######plot all mehtylotrophs######################################
+
+mac.f.dat.genus.methyl <- mac.f.dat %>%
+ filter(Genus %in% methylotrophs) %>%
+  select(-SampleID, -Plate, -Well, -barcodes, -Line, -OTU, -Plants, -Fertigation, -Plot, -Depth, 
+         -Allocation, -SampleStorage, -Isoprene, -Experiment, -Column, -Description, -Kingdom, -Phylum, -Class,
+         -Order, -Family)
+
+
+p <- mac.f.dat.genus.methyl %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Genus)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/methylotrophs-time-line2.png", width=10, height=5, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.methyl %>%
+  group_by(Line2) %>%
+  summarise(sum.abundance = sum(Abundance)) %>%
+  ggplot(., aes(x=Line2, y=sum.abundance, fill=Line2)) +
+  geom_bar(aes(), stat = "identity")
+p
+ggsave("../../Figures/16S/methylotrophs-sum-line2.png", width=5, height=4, units='in', dpi=1000)
+
+```
+genus - top only and rhizo - amethylotrophy
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.f.rel.abun <- transform_sample_counts(mac.rhizo.topf, function(x) x/sum(x)) #convert counts to relative abundances
+mac.f.glom <- tax_glom(mac.f.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.f.dat <- psmelt(mac.f.glom)
+mac.f.dat$Genus <- as.character(mac.f.dat$Genus) #convert to character vector from factor
+
+methylotrophs = c("Methylomonas", "Methylobacter", "Methylococcus", "Methylosinus", "Methylocystis","Methylophilus", "Methylovorus", "Methylophaga",
+                  "Methylobacterium", "Hyphomicrobium", "Acidomonas", "Paracoccus", "Xanthobacter", "Microcyclus", 
+                  "Thiobacillus", "Rhodospeudomonas", "Mycobacterium", "Bacillus", "Arthrobacter", "Amycolatopsis", "Balneimonas", "Methylocella",
+                  "Methylibium", "Methylotenera", "Methyloversatilis", "Methylobacillus", "Pseudomonas", "Burkholderia", "Catellibacterium", 
+                  "Methanosarcina", "Methanolobus", "Methylorubrum", "Methylocella", "Pleomorphomonas" , "Methylotuvimicrobium")
+
+#######plot paracoccus######################################
+
+mac.f.dat.genus.para <- mac.f.dat %>%
+ filter(Genus == "Paracoccus")
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Line2)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/paracoccus-time-line2.png", width=8, height=7, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.para %>%
+  ggplot(., aes(x=Line2, y=Abundance, fill=Line2)) +
+  geom_boxplot() 
+p
+ggsave("../../Figures/16S/paracoccus-line2.png", width=8, height=7, units='in', dpi=1000)
+#
+
+#######plot all mehtylotrophs######################################
+
+mac.f.dat.genus.methyl <- mac.f.dat %>%
+ filter(Genus %in% methylotrophs) %>%
+  select(-SampleID, -Plate, -Well, -barcodes, -Line, -OTU, -Plants, -Fertigation, -Plot, -Depth, 
+         -Allocation, -SampleStorage, -Isoprene, -Experiment, -Column, -Description, -Kingdom, -Phylum, -Class,
+         -Order, -Family)
+
+
+p <- mac.f.dat.genus.methyl %>%
+  ggplot(., aes(x=Time, y=Abundance, fill=Genus)) +
+  geom_boxplot() +
+  facet_wrap(~Line2)
+p
+ggsave("../../Figures/16S/methylotrophs-top-rhizo-time-line2.png", width=10, height=5, units='in', dpi=1000)
+
+p <- mac.f.dat.genus.methyl %>%
+  group_by(Line2) %>%
+  summarise(sum.abundance = sum(Abundance)) %>%
+  ggplot(., aes(x=Line2, y=sum.abundance, fill=Line2)) +
+  geom_bar(aes(), stat = "identity")
+p
+ggsave("../../Figures/16S/methylotrophs-top-rhizo-sum-line2.png", width=5, height=4, units='in', dpi=1000)
+
+```
+
+
+genus - rhizo
+
+
+```{r taxonomy genus, echo = FALSE}
+
+#taxonomy--------------------------------------------------------
+#prune out phyla below 2% in each sample for all experiments
+mac.rhizof.rel.abun <- transform_sample_counts(mac.rhizof, function(x) x/sum(x)) #convert counts to relative abundances
+mac.rhizof.glom <- tax_glom(mac.rhizof.rel.abun, taxrank = "Genus") #agglomerate taxa to Phylum-level
+mac.rhizof.dat <- psmelt(mac.rhizof.glom)
+mac.rhizof.dat$Genus <- as.character(mac.rhizof.dat$Genus) #convert to character vector from factor
+mac.rhizof.dat$Genus[mac.rhizof.dat$Abundance < 0.0175] <- "Genus < 1.75%"
+
+#######plot Genus######################################
+
+#change order of facets
+mac.rhizof.dat$Line <- factor(mac.rhizof.dat$Line, 
+                        levels = c("Control", "lo", "mid", "hi"))
+                          
+p <- ggplot(mac.rhizof.dat, aes(x=Time, y = Abundance, fill=Genus)) 
+
+p.genus <- p + geom_bar(aes(), stat = "identity", position = "fill") +
+  facet_wrap(Line ~ Depth, ncol = 2) +
+  scale_fill_manual(values=col_list) +
+  theme(text = element_text(size = 18),
+        axis.text.x=element_text(size=6, angle=90,hjust =1, vjust=0.2))
+
+p.genus
+filename <- paste0("../../Figures/16S/genus-top-time-line-rhizo.png")
+ggsave(filename,units=c('in'),width=15,height=12,dpi=1000,p.genus)
+
+```
+
+
+```{r family, include=FALSE}
+
+
+######prune family####################################
+#prune out family below 5% in each sample for all experiment
+#add familys below 5 % to 'other' category
+#pre and drought
+#RP.rel.abun <- transform_sample_counts(RP, function(x) x/sum(x)) #convert counts to relative abundances
+#RP.glom <- tax_glom(RP.rel.abun, taxrank = "Family") #agglomerate taxa to family-level
+#RP.dat <- psmelt(RP.glom)
+#RP.dat$Family <- as.character(RP.dat$Family) #convert to character vector from factor
+#RP.dat$Family[RP.dat$Abundance < 0.02] <- "Family < 2%"
+```
+
+
+## beta diversity 
+```{r beta diversity, include = FALSE}
+my.ord.jaccard <- ordinate(
+ physeq = mac.f.ra,
+  method = "PCoA",
+  distance = "jaccard")
+  #weighted=TRUE)
+
+ord.plot.jaccard.line.depth <- (
+  plot_ordination(
+    physeq = mac.f.ra,
+    ordination = my.ord.jaccard,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (jaccard)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.jaccard.line.depth
+filename <- paste0("../../Figures/16S/jaccard.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.jaccard.line.depth)
+
+my.ord.bray <- ordinate(
+ physeq = mac.f.ra,
+  method = "PCoA",
+  distance = "bray")
+  #weighted=TRUE)
+
+ord.plot.bray.line.depth <- (
+  plot_ordination(
+    physeq = mac.f.ra,
+    ordination = my.ord.bray,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (bray)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.bray.line.depth
+filename <- paste0("../../Figures/16S/bray.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.bray.line.depth)
+
+```
+
+## beta diversity -rhizo
+```{r beta diversity, include = FALSE}
+my.ord.jaccard <- ordinate(
+ physeq = mac.rhizof.ra,
+  method = "PCoA",
+  distance = "jaccard")
+  #weighted=TRUE)
+
+ord.plot.jaccard.line.depth <- (
+  plot_ordination(
+    physeq = mac.rhizof.ra,
+    ordination = my.ord.jaccard,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (jaccard)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.jaccard.line.depth
+filename <- paste0("../../Figures/16S/jaccard-rhizo.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.jaccard.line.depth)
+
+my.ord.bray <- ordinate(
+ physeq = mac.rhizof.ra,
+  method = "PCoA",
+  distance = "bray")
+  #weighted=TRUE)
+
+ord.plot.bray.line.depth <- (
+  plot_ordination(
+    physeq = mac.rhizof.ra,
+    ordination = my.ord.bray,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (bray)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.bray.line.depth
+filename <- paste0("../../Figures/16S/bray-rhizo.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.bray.line.depth)
+
+```
+## beta diversity- rhizo-top
+```{r beta diversity, include = FALSE}
+my.ord.jaccard <- ordinate(
+ physeq = mac.rhizo.topf.ra,
+  method = "PCoA",
+  distance = "jaccard")
+  #weighted=TRUE)
+
+ord.plot.jaccard.line.depth <- (
+  plot_ordination(
+    physeq = mac.rhizo.topf.ra,
+    ordination = my.ord.jaccard,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (jaccard)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.jaccard.line.depth
+filename <- paste0("../../Figures/16S/jaccard-rhizo-top.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.jaccard.line.depth)
+
+my.ord.bray <- ordinate(
+ physeq = mac.rhizo.topf.ra,
+  method = "PCoA",
+  distance = "bray")
+  #weighted=TRUE)
+
+ord.plot.bray.line.depth <- (
+  plot_ordination(
+    physeq = mac.rhizo.topf.ra,
+    ordination = my.ord.bray,
+    color = "Line",
+    type = "sample",
+    shape = "Depth",
+    title = "PCoA of mac (bray)"
+  ) +
+    geom_point(aes(color = Line), size = 4) )#+
+    #geom_point(colour = "grey90", size = 1) +
+    #scale_color_manual(breaks = c("Clitoria", "Piper", "Hibiscus"),
+    #                   values = c("green4", "red", "blue"))
+#)
+
+ord.plot.bray.line.depth
+filename <- paste0("../../Figures/16S/bray-rhizo-top.png")
+ggsave(filename,units=c('in'),width=8,height=8,dpi=1000,ord.plot.bray.line.depth)
+
+
+```
+
+## beta diversity- top-hi-lo
+```{r beta diversity, include = FALSE}
+sample_data(mac.top.hi.lo.f.ra)$Line = factor(sample_data(mac.top.hi.lo.f.ra)$Line, levels = c("lo", "hi"))
+
+
+my.ord.jaccard <- ordinate(
+ physeq = mac.top.hi.lo.f.ra,
+  method = "PCoA",
+  distance = "jaccard")
+  #weighted=TRUE)
+
+ord.plot.jaccard <- (
+  plot_ordination(
+    physeq = mac.top.hi.lo.f.ra,
+    ordination = my.ord.jaccard,
+    color = "Line",
+    type = "sample",
+    shape = "Time",
+    title = "PCoA of mac (jaccard)"
+  ) +
+   geom_point(aes(color = Line), size = size/2) +
+  theme_linedraw(base_size = size) + labs(x= "PCoA1", y="PCoA2") +
+  scale_color_manual(breaks = c("lo", "hi"),
+                      values = c("#F8766D", "#00BFC4"),
+                      labels = c("Low", "High")) +
+  scale_shape_manual(values= list_of_shapes,
+                     labels = c("July", "Aug", "Sept")) +
+  theme( legend.text = element_text(size=size+7, face="bold"),
+         legend.title = element_blank(),
+         legend.key.size = unit(0.6, "cm"),
+         legend.key.width = unit(0.6,"cm"),
+         legend.position = "bottom",
+         panel.grid = element_blank(),
+         axis.title.x = element_text(size=size+7,face="bold"),
+         axis.title.y = element_text(size=size+7,face="bold"),
+         plot.title = element_text(size=size+7,face="bold")))
+  
+
+ord.plot.jaccard
+filename <- paste0("../../Figures/16S/jaccard-top-hi-lo.png")
+ggsave(filename,units=c('in'),width=w,height=h,dpi=res)
+
+my.ord.bray <- ordinate(
+ physeq = mac.top.hi.lo.f.ra,
+  method = "PCoA",
+  distance = "bray")
+  #weighted=TRUE)
+
+ord.plot.bray <- (
+  plot_ordination(
+    physeq = mac.top.hi.lo.f.ra,
+    ordination = my.ord.bray,
+    color = "Line",
+    type = "sample",
+    shape = "Time",
+    title = "PCoA of mac (bray)"
+  ) + 
+  geom_point(aes(color = Line), size = size/2) +
+  theme_linedraw(base_size = size) + labs(x= "PCoA1", y="PCoA2") +
+  scale_color_manual(breaks = c("lo", "hi"),
+                      values = c("#F8766D", "#00BFC4"),
+                      labels = c("Low", "High")) +
+  scale_shape_manual(values= list_of_shapes,
+                     labels = c("July", "Aug", "Sept")) +
+  theme( legend.text = element_text(size=size+7, face="bold"),
+         legend.title = element_blank(),
+         legend.key.size = unit(0.6, "cm"),
+         legend.key.width = unit(0.6,"cm"),
+         legend.position = "bottom",
+         panel.grid = element_blank(),
+         axis.title.x = element_text(size=size+7,face="bold"),
+         axis.title.y = element_text(size=size+7,face="bold"),
+         plot.title = element_text(size=size+7,face="bold")))
+  
+
+ord.plot.bray
+filename <- paste0("../../Figures/16S/bray-top-hi-lo.png")
+ggsave(filename,units=c('in'),width=w,height=h,dpi=res)
+
+```
+
+## beta diversity- hi-lo
+```{r beta diversity, include = FALSE}
+sample_data(mac.hi.lo.no.zero.f.ra)$Line = factor(sample_data(mac.hi.lo.no.zero.f.ra)$Line, levels = c("lo", "hi"))
+
+
+my.ord.jaccard <- ordinate(
+ physeq = mac.hi.lo.no.zero.f.ra,
+  method = "PCoA",
+  distance = "jaccard")
+  #weighted=TRUE)
+
+ord.plot.jaccard <- (
+  plot_ordination(
+    physeq = mac.hi.lo.no.zero.f.ra,
+    ordination = my.ord.jaccard,
+    color = "Line",
+    type = "sample",
+    shape = "Time",
+    title = "PCoA of mac (jaccard)"
+  ) +
+   geom_point(aes(color = Line), size = size/2) +
+  theme_linedraw(base_size = size) + labs(x= "PCoA1", y="PCoA2") +
+  scale_color_manual(breaks = c("lo", "hi"),
+                      values = c("#F8766D", "#00BFC4"),
+                      labels = c("Low", "High")) +
+  scale_shape_manual(values= list_of_shapes,
+                     labels = c("July", "Aug", "Sept")) +
+  theme( legend.text = element_text(size=size+7, face="bold"),
+         legend.title = element_blank(),
+         legend.key.size = unit(0.6, "cm"),
+         legend.key.width = unit(0.6,"cm"),
+         legend.position = "bottom",
+         panel.grid = element_blank(),
+         axis.title.x = element_text(size=size+7,face="bold"),
+         axis.title.y = element_text(size=size+7,face="bold"),
+         plot.title = element_text(size=size+7,face="bold")))
+  
+
+ord.plot.jaccard
+filename <- paste0("../../Figures/16S/jaccard-hi-lo.png")
+ggsave(filename,units=c('in'),width=w,height=h,dpi=res)
+
+my.ord.bray <- ordinate(
+ physeq = mac.hi.lo.no.zero.f.ra,
+  method = "PCoA",
+  distance = "bray")
+  #weighted=TRUE)
+
+ord.plot.bray <- (
+  plot_ordination(
+    physeq = mac.hi.lo.no.zero.f.ra,
+    ordination = my.ord.bray,
+    color = "Line",
+    type = "sample",
+    shape = "Time",
+    title = "PCoA of mac (bray)"
+  ) + 
+  geom_point(aes(color = Line), size = size/2) +
+  theme_linedraw(base_size = size) + labs(x= "PCoA1", y="PCoA2") +
+  scale_color_manual(breaks = c("lo", "hi"),
+                      values = c("#F8766D", "#00BFC4"),
+                      labels = c("Low", "High")) +
+  scale_shape_manual(values= list_of_shapes,
+                     labels = c("July", "Aug", "Sept")) +
+  theme( legend.text = element_text(size=size+7, face="bold"),
+         legend.title = element_blank(),
+         legend.key.size = unit(0.6, "cm"),
+         legend.key.width = unit(0.6,"cm"),
+         legend.position = "bottom",
+         panel.grid = element_blank(),
+         axis.title.x = element_text(size=size+7,face="bold"),
+         axis.title.y = element_text(size=size+7,face="bold"),
+         plot.title = element_text(size=size+7,face="bold")))
+  
+
+ord.plot.bray
+filename <- paste0("../../Figures/16S/bray-hi-lo.png")
+ggsave(filename,units=c('in'),width=w,height=h,dpi=res)
+
+```
+##beta diversity statistics
+```{r}
+#create a bray curtis distance matrix
+mac.hi.lo.no.zero.f.ra_bray <- phyloseq::distance(mac.hi.lo.no.zero.f.ra, method = "bray")
+
+#making a data frame from the sample_data
+sampledf <- data.frame(sample_data(mac.hi.lo.no.zero.f.ra))
+
+#running adonis test
+adonis(mac.hi.lo.no.zero.f.ra_bray ~ Line + Time + Line*Time, data = sampledf)
+
+
+#create a jaccard distance matrix
+mac.hi.lo.no.zero.f.ra_jaccard <- phyloseq::distance(mac.hi.lo.no.zero.f.ra, method = "jaccard")
+
+#making a data frame from the sample_data
+sampledf <- data.frame(sample_data(mac.hi.lo.no.zero.f.ra))
+
+#running adonis test
+adonis(mac.hi.lo.no.zero.f.ra_jaccard ~ Line + Time + Line*Time, data = sampledf)
+
+
+#Df SumsOfSqs MeanSqs F.Model      R2 Pr(>F)    
+```
+
+
+## Transform phyloseq object to get input for deseq2 
+```{r phyloseq-to-deseq, echo = FALSE}
+#both depths
+asv_tab <- as.data.frame(abundances(mac.f.ra)) # get asvs/otus
+asv_tab$asv_id <- rownames(asv_tab) # add a new column for ids
+#tax_tab <- as.data.frame(tax_table(x)) # get taxonomy note: can be slow
+tax_tab <- as(mac.f.ra@tax_table,"matrix") # get taxonomy note as matrix
+tax_tab <- as.data.frame(tax_tab) # convert to data frame
+tax_tab$asv_id <- rownames(tax_tab) # add a new column for ids
+asv_tax_tab <- tax_tab %>% 
+  left_join(asv_tab, by="asv_id") # join to get taxonomy and asv table
+
+head(asv_tax_tab)[,1:8]
+
+#add column with first 5 digits of OTU name and taxonomy
+asv_tax_tab <- asv_tax_tab %>%
+  unite(OTU, c(Kingdom, Phylum, Class, Order, Family, Genus, Species, asv_id), sep = "_", remove = TRUE)
+
+write.csv(asv_tax_tab, "../../Output/deseq2/asv_tax_asv.csv")
+
+#top depth
+asv_tab_top <- as.data.frame(abundances(mac.topf.ra)) # get asvs/otus
+asv_tab_top$asv_id <- rownames(asv_tab_top) # add a new column for ids
+#tax_tab <- as.data.frame(tax_table(x)) # get taxonomy note: can be slow
+tax_tab_top <- as(mac.topf.ra@tax_table,"matrix") # get taxonomy note as matrix
+tax_tab_top <- as.data.frame(tax_tab_top) # convert to data frame
+tax_tab_top$asv_id <- rownames(tax_tab_top) # add a new column for ids
+asv_tax_tab_top <- tax_tab_top %>% 
+  left_join(asv_tab_top, by="asv_id") # join to get taxonomy and asv table
+
+head(asv_tax_tab_top)[,1:8]
+
+#add column with first 5 digits of OTU name and taxonomy
+asv_tax_tab_top <- asv_tax_tab_top %>%
+  unite(OTU, c(Kingdom, Phylum, Class, Order, Family, Genus, Species, asv_id), sep = "_", remove = TRUE)
+
+write.csv(asv_tax_tab_top, "../../Output/deseq2/asv_tax_asv_top.csv")
+
+#bottomdepth
+asv_tab_deep <- as.data.frame(abundances(mac.deepf.ra)) # get asvs/otus
+asv_tab_deep$asv_id <- rownames(asv_tab_deep) # add a new column for ids
+#tax_tab <- as.data.frame(tax_table(x)) # get taxonomy note: can be slow
+tax_tab_deep <- as(mac.deepf.ra@tax_table,"matrix") # get taxonomy note as matrix
+tax_tab_deep <- as.data.frame(tax_tab_deep) # convert to data frame
+tax_tab_deep$asv_id <- rownames(tax_tab_deep) # add a new column for ids
+asv_tax_tab_deep <- tax_tab_deep %>% 
+  left_join(asv_tab_deep, by="asv_id") # join to get taxonomy and asv table
+
+head(asv_tax_tab_deep)[,1:8]
+
+#add column with first 5 digits of OTU name and taxonomy
+asv_tax_tab_deep <- asv_tax_tab_deep %>%
+  unite(OTU, c(Kingdom, Phylum, Class, Order, Family, Genus, Species, asv_id), sep = "_", remove = TRUE)
+
+write.csv(asv_tax_tab_deep, "../../Output/deseq2/asv_tax_asv_deep.csv")
+
+#rhizosphere
+asv_tab_rhizo <- as.data.frame(abundances(mac.rhizof.ra)) # get asvs/otus
+asv_tab_rhizo$asv_id <- rownames(asv_tab_rhizo) # add a new column for ids
+#tax_tab <- as.data.frame(tax_table(x)) # get taxonomy note: can be slow
+tax_tab_rhizo <- as(mac.rhizof.ra@tax_table,"matrix") # get taxonomy note as matrix
+tax_tab_rhizo <- as.data.frame(tax_tab_rhizo) # convert to data frame
+tax_tab_rhizo$asv_id <- rownames(tax_tab_rhizo) # add a new column for ids
+asv_tax_tab_rhizo <- tax_tab_rhizo %>% 
+  left_join(asv_tab_rhizo, by="asv_id") # join to get taxonomy and asv table
+
+head(asv_tax_tab_rhizo)[,1:8]
+
+#add column with first 5 digits of OTU name and taxonomy
+asv_tax_tab_rhizo <- asv_tax_tab_rhizo %>%
+  unite(OTU, c(Kingdom, Phylum, Class, Order, Family, Genus, Species, asv_id), sep = "_", remove = TRUE)
+
+write.csv(asv_tax_tab_rhizo, "../../Output/deseq2/asv_tax_asv_rhizo.csv")
+
+#rhizosphere - top
+asv_tab_rhizo.top <- as.data.frame(abundances(mac.rhizo.topf.ra)) # get asvs/otus
+asv_tab_rhizo.top$asv_id <- rownames(asv_tab_rhizo.top) # add a new column for ids
+#tax_tab <- as.data.frame(tax_table(x)) # get taxonomy note: can be slow
+tax_tab_rhizo.top <- as(mac.rhizo.topf.ra@tax_table,"matrix") # get taxonomy note as matrix
+tax_tab_rhizo.top <- as.data.frame(tax_tab_rhizo.top) # convert to data frame
+tax_tab_rhizo.top$asv_id <- rownames(tax_tab_rhizo.top) # add a new column for ids
+asv_tax_tab_rhizo.top <- tax_tab_rhizo.top %>% 
+  left_join(asv_tab_rhizo.top, by="asv_id") # join to get taxonomy and asv table
+
+head(asv_tax_tab_rhizo.top)[,1:8]
+
+#add column with first 5 digits of OTU name and taxonomy
+asv_tax_tab_rhizo.top <- asv_tax_tab_rhizo.top %>%
+  unite(OTU, c(Kingdom, Phylum, Class, Order, Family, Genus, Species, asv_id), sep = "_", remove = TRUE)
+
+write.csv(asv_tax_tab_rhizo.top, "../../Output/deseq2/asv_tax_asv_rhizo.top.csv")
+
+
+```
+
+
+## import tables for deseq2
+```{r load_data, echo = FALSE}
+#import count data, transform to matrix, import column metadata, check that its a data.frame (all depths)
+cts.0 <- read.csv("../../Output/deseq2/asv_tax_asv.csv", header = TRUE, sep =",")
+cts.0$X <- NULL
+
+coldata <- read.delim("../../Data/16S/sample-metadata-mac-only.txt", header = TRUE)
+
+cts.02 <- as.matrix(cts.0)
+row.names(cts.02) <- cts.02[,1]
+cts.02 <- cts.02[,-1]
+
+cts <- matrix(as.numeric(cts.02),    # Convert to numeric matrix
+                  ncol = ncol(cts.02))
+cts.0$OTU = NULL
+colnames(cts) <- colnames(cts.0)
+
+row.names(cts) <- row.names(cts.02)
+new_order = sort(colnames(cts),decreasing=TRUE)
+cts <- cts[, new_order]
+
+row.names(coldata) <- coldata$new_ID
+coldata <- coldata[order(coldata$SampleID, decreasing = TRUE),]
+
+coldata$SampleID <- NULL
+
+#import count data, transform to matrix, import column metadata, check that its a data.frame (top depth)
+cts.top.0 <- read.csv("../../Output/deseq2/asv_tax_asv_top.csv", header = TRUE, sep =",")
+cts.top.0$X <- NULL
+cts.samples <- cts.top.0[,2:71]
+cts.samples.names <- colnames(cts.samples)
+
+coldata.top <- read.delim("../../Data/16S/sample-metadata-mac-top.txt", header = TRUE)
+
+cts.top.02 <- as.matrix(cts.top.0)
+row.names(cts.top.02) <- cts.top.02[,1]
+cts.top.02 <- cts.top.02[,-1]
+
+cts.top <- matrix(as.numeric(cts.top.02),    # Convert to numeric matrix
+                  ncol = ncol(cts.top.02))
+cts.top.0$OTU = NULL
+colnames(cts.top) <- colnames(cts.top.0)
+
+row.names(cts.top) <- row.names(cts.top.02)
+new_order = sort(colnames(cts.top),decreasing=TRUE)
+cts.top <- cts.top[, new_order]
+
+row.names(coldata.top) <- coldata.top$new_ID
+coldata.top <- coldata[order(coldata.top$SampleID, decreasing = TRUE),]
+
+coldata.top$SampleID <- NULL
+
+#import count data, transform to matrix, import column metadata, check that its a data.frame (bottom depth)
+cts.deep.0 <- read.csv("../../Output/deseq2/asv_tax_asv_deep.csv", header = TRUE, sep =",")
+cts.deep.0$X <- NULL
+cts.samples <- cts.deep.0[,2:62]
+cts.samples.names <- colnames(cts.samples)
+
+coldata.deep <- read.delim("../../Data/16S/sample-metadata-mac-deep.txt", header = TRUE)
+
+cts.deep.02 <- as.matrix(cts.deep.0)
+row.names(cts.deep.02) <- cts.deep.02[,1]
+cts.deep.02 <- cts.deep.02[,-1]
+
+cts.deep <- matrix(as.numeric(cts.deep.02),    # Convert to numeric matrix
+                  ncol = ncol(cts.deep.02))
+cts.deep.0$OTU = NULL
+colnames(cts.deep) <- colnames(cts.deep.0)
+
+row.names(cts.deep) <- row.names(cts.deep.02)
+new_order = sort(colnames(cts.deep),decreasing=TRUE)
+cts.deep <- cts.deep[, new_order]
+
+row.names(coldata.deep) <- coldata.deep$new_ID
+coldata.deep <- coldata[order(coldata.deep$SampleID, decreasing = TRUE),]
+
+coldata.deep$SampleID <- NULL
+
+#import count data, transform to matrix, import column metadata, check that its a data.frame (rhizosphere
+cts.rhizo.0 <- read.csv("../../Output/deseq2/asv_tax_asv_rhizo.csv", header = TRUE, sep =",")
+cts.rhizo.0$X <- NULL
+cts.samples <- cts.rhizo.0[,2:48]
+cts.samples.names <- colnames(cts.samples)
+
+coldata.rhizo <- read.delim("../../Data/16S/sample-metadata-mac-rhizo.txt", header = TRUE)
+
+cts.rhizo.02 <- as.matrix(cts.rhizo.0)
+row.names(cts.rhizo.02) <- cts.rhizo.02[,1]
+cts.rhizo.02 <- cts.rhizo.02[,-1]
+
+cts.rhizo <- matrix(as.numeric(cts.rhizo.02),    # Convert to numeric matrix
+                  ncol = ncol(cts.rhizo.02))
+cts.rhizo.0$OTU = NULL
+colnames(cts.rhizo) <- colnames(cts.rhizo.0)
+
+row.names(cts.rhizo) <- row.names(cts.rhizo.02)
+new_order = sort(colnames(cts.rhizo),decreasing=TRUE)
+cts.rhizo <- cts.rhizo[, new_order]
+
+row.names(coldata.rhizo) <- coldata.rhizo$new_ID
+coldata.rhizo <- coldata[order(coldata.rhizo$SampleID, decreasing = TRUE),]
+
+coldata.rhizo$SampleID <- NULL
+
+#import count data, transform to matrix, import column metadata, check that its a data.frame (rhizosphere/top)
+cts.rhizo.top.0 <- read.csv("../../Output/deseq2/asv_tax_asv_rhizo.top.csv", header = TRUE, sep =",")
+cts.rhizo.top.0$X <- NULL
+cts.samples <- cts.rhizo.top.0[,2:24]
+cts.samples.names <- colnames(cts.samples)
+
+coldata.rhizo.top <- read.delim("../../Data/16S/sample-metadata-mac-rhizo.top.txt", header = TRUE)
+
+cts.rhizo.top.02 <- as.matrix(cts.rhizo.top.0)
+row.names(cts.rhizo.top.02) <- cts.rhizo.top.02[,1]
+cts.rhizo.top.02 <- cts.rhizo.top.02[,-1]
+
+cts.rhizo.top <- matrix(as.numeric(cts.rhizo.top.02),    # Convert to numeric matrix
+                  ncol = ncol(cts.rhizo.top.02))
+cts.rhizo.top.0$OTU = NULL
+colnames(cts.rhizo.top) <- colnames(cts.rhizo.top.0)
+
+row.names(cts.rhizo.top) <- row.names(cts.rhizo.top.02)
+new_order = sort(colnames(cts.rhizo.top),decreasing=TRUE)
+cts.rhizo.top <- cts.rhizo.top[, new_order]
+
+row.names(coldata.rhizo.top) <- coldata.rhizo.top$new_ID
+coldata.rhizo.top <- coldata[order(coldata.rhizo.top$SampleID, decreasing = TRUE),]
+
+coldata.rhizo.top$SampleID <- NULL
+```
+
+
+## Create deseq2 object to compare productivity lines
+
+```{r create_deseq2_object_both_depths}
+
+###create a deseq2 object with Time as design###
+coldata$Line2 <- as.factor(coldata$Line2)
+coldata$Line2 <- relevel(coldata$Line2, ref="lo")
+
+
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ Line2)
+```
+
+## explore data using vst counts and pca
+
+```{r data_exploration}
+vstcounts <- varianceStabilizingTransformation(dds, blind=TRUE)
+vst.export<- assay(vstcounts)
+vst.export<- as.data.frame(vst.export)
+#write.csv(vst.export, "../Output/Deseq2/vst-metaT.csv")
+
+plotPCA(vstcounts, intgroup=c("Line2", "Depth"))
+
+```
+
+## find asvs that are up or down in hi vs lo productivity lines
+
+```{r DE_analysis, echo = FALSE}
+dds <- DESeq(dds)
+resultsNames(dds) # lists the coefficients
+
+##drought vs predrought time 0
+res <- results(dds, contrast = c("Line2", "hi", "lo"))
+res.df <- as.data.frame(res)
+
+#The order of this is important..here the "reference" value is "0" 
+plotMA(res, ylim=c(-5,5))
+
+summary(res)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-5,5), ylim=c(0,10)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(as.data.frame(res), "../../Output/deseq2/deseq_res_hi_vs_lo.csv")
+
+```
+
+
+
+
+
+
+```{r plot deseq2 results}
+res.df$taxa <- rownames(res.df)
+res.df.for.plot <- res.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family',
+      'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(pvalue < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.df.for.plot$id_ASV
+res.df.for.plot$id_ASV <- factor(res.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac hi vs lo productivity") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-hi-vs-lo.png", dpi = 1000, width = 8, height = 10, plot)
+plot
+
+
+```
+
+
+
+## create deseq2 object for only top depth
+```{r create_deseq1_object_top_depth}
+###create a deseq2 object with Time as design###
+coldata.top$Line2 <- as.factor(coldata.top$Line2)
+coldata.top$Line2 <- relevel(coldata.top$Line2, ref="lo")
+
+
+dds.top <- DESeqDataSetFromMatrix(countData = cts.top,
+                              colData = coldata.top,
+                              design= ~ Line2)
+```
+
+## find asvs that are up or down in hi vs. low in top depth only
+```{r DE_analysis_top_depth, echo = FALSE}
+dds.top <- DESeq(dds.top)
+resultsNames(dds.top) # lists the coefficients
+
+##drought vs predrought time 0
+res.top <- results(dds.top, contrast = c("Line2", "hi", "lo")) #The order of this is important..here the "reference" value is "0" 
+res.top.df <- as.data.frame(res.top)
+
+
+plotMA(res.top, ylim=c(-5,5))
+
+summary(res.top)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res.top, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,10), ylim=c(0,10)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res.top, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res.top, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(res.top, "../../Output/deseq2/deseq_res_top_hi_vs_lo.csv")
+
+```
+
+```{r plot deseq2 results}
+res.top.df$taxa <- rownames(res.top.df)
+res.top.df.for.plot <- res.top.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family',
+      'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(pvalue < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.top.df.for.plot$id_ASV
+res.top.df.for.plot$id_ASV <- factor(res.top.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.top.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac hi vs lo productivity - top") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-hi-vs-lo-top.png", dpi = 1000, width = 8, height = 10, plot)
+plot
+
+
+```
+## create deseq2 object for only bottom depth
+```{r create_deseq1_object_top_depth}
+###create a deseq2 object with Time as design###
+coldata.deep$Line2 <- as.factor(coldata.deep$Line2)
+coldata.deep$Line2 <- relevel(coldata.deep$Line2, ref="lo")
+
+
+dds.deep <- DESeqDataSetFromMatrix(countData = cts.deep,
+                              colData = coldata.deep,
+                              design= ~ Line2)
+```
+
+## find asvs that are up or down regulated at timepoint 1 in bottom depth
+```{r DE_analysis_top_depth, echo = FALSE}
+dds.deep <- DESeq(dds.deep)
+resultsNames(dds.deep) # lists the coefficients
+
+##drought vs predrought time 0
+res.deep <- results(dds.deep) #The order of this is important..here the "reference" value is "0" 
+res.deep.df <- as.data.frame(res.deep)
+
+
+
+plotMA(res.deep, ylim=c(-40,40))
+
+summary(res.deep)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res.deep, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,30), ylim=c(0,20)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res.deep, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res.deep, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(res.deep, "../../Output/deseq2/deseq_res_deep.csv")
+
+```
+
+```{r plot deseq2 results}
+res.deep.df$taxa <- rownames(res.deep.df)
+res.deep.df.for.plot <- res.deep.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family',
+      'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(pvalue < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.deep.df.for.plot$id_ASV
+res.deep.df.for.plot$id_ASV <- factor(res.deep.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.deep.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac hi vs lo productivity - deep") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-hi-vs-lo-deep.png", dpi = 1000, width = 8, height = 10, plot)
+
+```
+
+
+## create deseq2 object to compare rhizosphere and bulk
+```{r create_deseq1_object_top_depth}
+###create a deseq2 object with Time as design###
+coldata$Allocation <- as.factor(coldata$Allocation)
+coldata$Allocation <- relevel(coldata$Allocation, ref="bulk")
+
+
+dds.allocation<- DESeqDataSetFromMatrix(countData = cts,
+                              colData = coldata,
+                              design= ~ Allocation)
+```
+## find asvs that are up or down regulated in rhizosphere
+```{r DE_analysis_top_depth, echo = FALSE}
+dds.allocation <- DESeq(dds.allocation)
+resultsNames(dds.allocation) # lists the coefficients
+
+##drought vs predrought time 0
+res.allocation <- results(dds.allocation) #The order of this is important..here the "reference" value is "0" 
+res.allocation.df <- as.data.frame(res.allocation)
+
+
+
+plotMA(res.allocation, ylim=c(-40,40))
+
+summary(res.allocation)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,30), ylim=c(0,20)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res.allocation, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res.allocation, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(res.allocation, "../../Output/deseq2/deseq_allocation.csv")
+
+```
+
+```{r plot deseq2 results}
+res.allocation.df$taxa <- rownames(res.allocation.df)
+res.allocation.df.for.plot <- res.allocation.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family',
+      'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(padj < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.allocation.df.for.plot$id_ASV
+res.allocation.df.for.plot$id_ASV <- factor(res.allocation.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.allocation.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac rhizosphere vs bulk") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-rhizo-vs-bulk.png", dpi = 1000, width = 8, height = 10, plot)
+
+```
+## create deseq2 object to compare hi and lo in rhizo
+```{r create_deseq1_object_top_depth}
+###create a deseq2 object with Time as design###
+coldata.rhizo$Line <- as.factor(coldata.rhizo$Line)
+coldata.rhizo$Line <- relevel(coldata.rhizo$Line, ref="lo")
+
+
+dds.rhizo.line<- DESeqDataSetFromMatrix(countData = cts.rhizo,
+                              colData = coldata.rhizo,
+                              design= ~ Line)
+```
+## find asvs that are up or down regulated in high productivity in rhizo only
+```{r DE_analysis_top_depth, echo = FALSE}
+dds.rhizo.line <- DESeq(dds.rhizo.line)
+resultsNames(dds.rhizo.line) # lists the coefficients
+
+##drought vs predrought time 0
+res.rhizo.line <- results(dds.rhizo.line, contrast = c("Line", "hi", "lo")) #The order of this is important..here the "reference" value is "0" 
+res.rhizo.line.df <- as.data.frame(res.rhizo.line)
+
+
+
+plotMA(res.rhizo.line, ylim=c(-40,40))
+
+summary(res.rhizo.line)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,30), ylim=c(0,20)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res.rhizo.line, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res.rhizo.line, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(res.rhizo.line, "../../Output/deseq2/deseq_rhizo-line.csv")
+
+```
+
+#plot deseq2 results-rhizo
+```{r plot deseq2 results}
+res.rhizo.line.df$taxa <- rownames(res.rhizo.line.df)
+res.rhizo.line.df.for.plot <- res.rhizo.line.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family',
+      'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(pvalue < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.rhizo.line.df.for.plot$id_ASV
+res.rhizo.line.df.for.plot$id_ASV <- factor(res.rhizo.line.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.rhizo.line.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac hi vs lo productivity - rhizo only") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-hi-vs-lo-rhizo-only.png", dpi = 1000, width = 8, height = 10, plot)
+
+```
+
+## create deseq2 object to compare hi and lo in rhizo/top
+```{r create_deseq1_object_top_depth}
+###create a deseq2 object with Time as design###
+coldata.rhizo.top$Line <- as.factor(coldata.rhizo.top$Line)
+coldata.rhizo.top$Line <- relevel(coldata.rhizo.top$Line, ref="lo")
+
+
+dds.rhizo.top.line<- DESeqDataSetFromMatrix(countData = cts.rhizo.top,
+                              colData = coldata.rhizo.top,
+                              design= ~ Line)
+```
+## find asvs that are up or down regulated in high productivity in rhizo/top only
+```{r DE_analysis_top_depth, echo = FALSE}
+dds.rhizo.top.line <- DESeq(dds.rhizo.top.line)
+resultsNames(dds.rhizo.top.line) # lists the coefficients
+
+##drought vs predrought time 0
+res.rhizo.top.line <- results(dds.rhizo.top.line, contrast = c("Line", "hi", "lo")) #The order of this is important..here the "reference" value is "0" 
+res.rhizo.top.line.df <- as.data.frame(res.rhizo.top.line)
+
+
+
+plotMA(res.rhizo.top.line, ylim=c(-40,40))
+
+summary(res.rhizo.top.line)
+
+#make volcano plot
+#reset par
+par(mfrow=c(1,1))
+# Make a basic volcano plot
+with(res, plot(log2FoldChange, -log10(pvalue), pch=20, main="Volcano plot", xlim=c(-10,30), ylim=c(0,20)))
+
+# Add colored points: blue if padj<0.01, red if log2FC>1 and padj<0.05)
+with(subset(res.rhizo.top.line, padj<.01 ), points(log2FoldChange, -log10(pvalue), pch=20, col="blue"))
+with(subset(res.rhizo.top.line, padj<.01 & abs(log2FoldChange)>2), points(log2FoldChange, -log10(pvalue), pch=20, col="red"))
+
+#write results to file
+write.csv(res.rhizo.top.line, "../../Output/deseq2/deseq_rhizo.top-line.csv")
+
+```
+
+```{r}
+res.rhizo.top.line.df$taxa <- rownames(res.rhizo.top.line.df)
+res.rhizo.top.line.df.for.plot <- res.rhizo.top.line.df %>% separate(taxa, c('Kingdom', 'Phylum', 'Class', 'Order', 'Family', 'Genus', 'Species', 'ASV'), sep = "_") %>%
+  filter(pvalue < 0.05) %>%
+  mutate(id = row_number()) %>%
+  unite(id_ASV, c("id", "Family"), remove = FALSE) %>%
+  arrange(log2FoldChange)
+
+order <- res.rhizo.top.line.df.for.plot$id_ASV
+res.rhizo.top.line.df.for.plot$id_ASV <- factor(res.rhizo.top.line.df.for.plot$id_ASV, level = order)
+
+
+plot <- ggplot(res.rhizo.top.line.df.for.plot, aes(x=id_ASV, y=log2FoldChange)) + 
+  geom_point(stat='identity', aes(col=Phylum), size=6)  +
+  #scale_color_brewer(palette = "Paired") +
+  #scale_color_manual(values= col_list) +
+  labs(title="DeSeq2 ",
+       subtitle = "mac hi vs lo productivity - rhizo-top") +
+  #ylim(-2.5, 2.5) +
+  coord_flip() 
+ggsave("../../Figures/16S/deseq2-hi-vs-lo-rhizo-top-only.png", dpi = 1000, width = 8, height = 10, plot)
+```
+
